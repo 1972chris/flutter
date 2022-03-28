@@ -6,13 +6,13 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 
 import 'box.dart';
 import 'layer.dart';
 import 'object.dart';
-
 
 /// How an embedded platform view behave during hit tests.
 enum PlatformViewHitTestBehavior {
@@ -75,7 +75,6 @@ Set<Type> _factoriesTypeSet<T>(Set<Factory<T>> factories) {
 ///  * [AndroidView] which is a widget that is used to show an Android view.
 ///  * [PlatformViewsService] which is a service for controlling platform views.
 class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
-
   /// Creates a render object for an Android view.
   RenderAndroidView({
     required AndroidViewController viewController,
@@ -92,12 +91,17 @@ class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
     updateGestureRecognizers(gestureRecognizers);
     _viewController.addOnPlatformViewCreatedListener(_onPlatformViewCreated);
     this.hitTestBehavior = hitTestBehavior;
+    _setOffset();
   }
 
   _PlatformViewState _state = _PlatformViewState.uninitialized;
 
+  Size? _currentTextureSize;
+
+  bool _isDisposed = false;
+
   /// The Android view controller for the Android view associated with this render object.
-  AndroidViewController get viewcontroller => _viewController;
+  AndroidViewController get viewController => _viewController;
   AndroidViewController _viewController;
   /// Sets a new Android view controller.
   ///
@@ -174,8 +178,6 @@ class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
     _sizePlatformView();
   }
 
-  late Size _currentAndroidViewSize;
-
   Future<void> _sizePlatformView() async {
     // Android virtual displays cannot have a zero size.
     // Trying to size it to 0 crashes the app, which was happening when starting the app
@@ -190,8 +192,7 @@ class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
     Size targetSize;
     do {
       targetSize = size;
-      await _viewController.setSize(targetSize);
-      _currentAndroidViewSize = targetSize;
+      _currentTextureSize = await _viewController.setSize(targetSize);
       // We've resized the platform view to targetSize, but it is possible that
       // while we were resizing the render object's size was changed again.
       // In that case we will resize the platform view again.
@@ -201,14 +202,39 @@ class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
     markNeedsPaint();
   }
 
+  // Sets the offset of the underlaying platform view on the platform side.
+  //
+  // This allows the Android native view to draw the a11y highlights in the same
+  // location on the screen as the platform view widget in the Flutter framework.
+  //
+  // It also allows platform code to obtain the correct position of the Android
+  // native view on the screen.
+  void _setOffset() {
+    SchedulerBinding.instance.addPostFrameCallback((_) async {
+      if (!_isDisposed) {
+        await _viewController.setOffset(localToGlobal(Offset.zero));
+        // Schedule a new post frame callback.
+        _setOffset();
+      }
+    });
+  }
+
   @override
   void paint(PaintingContext context, Offset offset) {
     if (_viewController.textureId == null)
       return;
 
-    // Clip the texture if it's going to paint out of the bounds of the renter box
-    // (see comment in _paintTexture for an explanation of when this happens).
-    if ((size.width < _currentAndroidViewSize.width || size.height < _currentAndroidViewSize.height) && clipBehavior != Clip.none) {
+    // As resizing the Android view happens asynchronously we don't know exactly when is a
+    // texture frame with the new size is ready for consumption.
+    // TextureLayer is unaware of the texture frame's size and always maps it to the
+    // specified rect. If the rect we provide has a different size from the current texture frame's
+    // size the texture frame will be scaled.
+    // To prevent unwanted scaling artifacts while resizing, clip the texture.
+    // This guarantees that the size of the texture frame we're painting is always
+    // _currentAndroidTextureSize.
+    final bool isTextureLargerThanWidget = _currentTextureSize!.width > size.width ||
+                                           _currentTextureSize!.height > size.height;
+    if (isTextureLargerThanWidget && clipBehavior != Clip.none) {
       _clipRectLayer.layer = context.pushClipRect(
         true,
         offset,
@@ -227,24 +253,18 @@ class RenderAndroidView extends RenderBox with _PlatformViewGestureMixin {
 
   @override
   void dispose() {
+    _isDisposed = true;
     _clipRectLayer.layer = null;
     super.dispose();
   }
 
   void _paintTexture(PaintingContext context, Offset offset) {
-    // As resizing the Android view happens asynchronously we don't know exactly when is a
-    // texture frame with the new size is ready for consumption.
-    // TextureLayer is unaware of the texture frame's size and always maps it to the
-    // specified rect. If the rect we provide has a different size from the current texture frame's
-    // size the texture frame will be scaled.
-    // To prevent unwanted scaling artifacts while resizing we freeze the texture frame, until
-    // we know that a frame with the new size is in the buffer.
-    // This guarantees that the size of the texture frame we're painting is always
-    // _currentAndroidViewSize.
+    if (_currentTextureSize == null)
+      return;
+
     context.addLayer(TextureLayer(
-      rect: offset & _currentAndroidViewSize,
-      textureId: _viewController.textureId!,
-      freeze: _state == _PlatformViewState.resizing,
+      rect: offset & _currentTextureSize!,
+      textureId: viewController.textureId!,
     ));
   }
 
@@ -408,12 +428,12 @@ class RenderUiKitView extends RenderBox {
   @override
   void attach(PipelineOwner owner) {
     super.attach(owner);
-    GestureBinding.instance!.pointerRouter.addGlobalRoute(_handleGlobalPointerEvent);
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_handleGlobalPointerEvent);
   }
 
   @override
   void detach() {
-    GestureBinding.instance!.pointerRouter.removeGlobalRoute(_handleGlobalPointerEvent);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_handleGlobalPointerEvent);
     _gestureRecognizer!.reset();
     super.detach();
   }
@@ -450,7 +470,6 @@ class _UiKitViewGestureRecognizer extends OneSequenceGestureRecognizer {
       },
     ).toSet();
   }
-
 
   // We use OneSequenceGestureRecognizers as they support gesture arena teams.
   // TODO(amirh): get a list of GestureRecognizers here.
@@ -615,7 +634,6 @@ class _PlatformViewGestureRecognizer extends OneSequenceGestureRecognizer {
 /// [PlatformViewRenderBox] presents a platform view by adding a [PlatformViewLayer] layer,
 /// integrates it with the gesture arenas system and adds relevant semantic nodes to the semantics tree.
 class PlatformViewRenderBox extends RenderBox with _PlatformViewGestureMixin {
-
   /// Creating a render object for a [PlatformViewSurface].
   ///
   /// The `controller` parameter must not be null.
@@ -631,8 +649,9 @@ class PlatformViewRenderBox extends RenderBox with _PlatformViewGestureMixin {
     updateGestureRecognizers(gestureRecognizers);
   }
 
-  /// Sets the [controller] for this render object.
-  ///
+  /// The controller for this render object.
+  PlatformViewController get controller => _controller;
+  PlatformViewController _controller;
   /// This value must not be null, and setting it to a new value will result in a repaint.
   set controller(PlatformViewController controller) {
     assert(controller != null);
@@ -656,8 +675,6 @@ class PlatformViewRenderBox extends RenderBox with _PlatformViewGestureMixin {
   void updateGestureRecognizers(Set<Factory<OneSequenceGestureRecognizer>> gestureRecognizers) {
     _updateGestureRecognizersWithCallBack(gestureRecognizers, _controller.dispatchPointerEvent);
   }
-
-  PlatformViewController _controller;
 
   @override
   bool get sizedByParent => true;

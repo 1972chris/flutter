@@ -80,6 +80,18 @@ void main() {
     });
   });
 
+  testWithoutContext('getDartNameForDarwinArch returns name used in Dart SDK', () {
+    expect(getDartNameForDarwinArch(DarwinArch.armv7),  'armv7');
+    expect(getDartNameForDarwinArch(DarwinArch.arm64),  'arm64');
+    expect(getDartNameForDarwinArch(DarwinArch.x86_64), 'x64');
+  });
+
+  testWithoutContext('getNameForDarwinArch returns Apple names', () {
+    expect(getNameForDarwinArch(DarwinArch.armv7),  'armv7');
+    expect(getNameForDarwinArch(DarwinArch.arm64),  'arm64');
+    expect(getNameForDarwinArch(DarwinArch.x86_64), 'x86_64');
+  });
+
   testWithoutContext('getNameForTargetPlatform on Darwin arches', () {
     expect(getNameForTargetPlatform(TargetPlatform.ios, darwinArch: DarwinArch.arm64), 'ios-arm64');
     expect(getNameForTargetPlatform(TargetPlatform.ios, darwinArch: DarwinArch.armv7), 'ios-armv7');
@@ -187,7 +199,7 @@ void main() {
     ]);
   });
 
-  testWithoutContext('encodeDartDefines encodes define values with base64 encoded compnents', () {
+  testWithoutContext('encodeDartDefines encodes define values with base64 encoded components', () {
     expect(encodeDartDefines(<String>['"hello"']), 'ImhlbGxvIg==');
     expect(encodeDartDefines(<String>['https://www.google.com']), 'aHR0cHM6Ly93d3cuZ29vZ2xlLmNvbQ==');
     expect(encodeDartDefines(<String>['2,3,4', '5']), 'MiwzLDQ=,NQ==');
